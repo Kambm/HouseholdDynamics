@@ -1,0 +1,403 @@
+\documentclass{article}
+\usepackage{graphicx}
+%\usepackage{authblk}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{tikz}
+
+
+\begin{document}
+\title{Figures for the minimal
+  model for household-based testing and tracing in epidemics}
+
+\author{Greg Huber \and Mason Kamb \and Kyle Kawagoe \and
+Lucy M.~Li \and Aaron McGeever \and Jonathan Miller \and Boris Veytsman \and 
+Dan Zigmond}
+
+ \date{\today}
+
+ \maketitle
+%\tableofcontents
+%\listoffigures
+%\listoftables
+%\listofalgorithms
+%\lstlistoflistings
+%\clearpage
+
+<<setup>>=
+opts_chunk$set(
+    dev='tikz',
+    cache=T
+)
+options(tikzDefaultEngine='luatex')
+library(reticulate)
+library(deSolve)
+library(tidyverse)
+library(ggthemes)
+theme_set(theme_bw())
+@
+
+\section{Introduction}
+\label{sec:intro}
+
+Here we generate the figures for the paper.
+
+\section{Minimal testing rate}
+\label{sec:minimal_testing_rate}
+
+The minimal testing rate to stop the epidemics is determined from the
+the equation $\lambda=0$, where $\lambda$ is the leading eigenvalue of
+the epidemics equations (see the notation in the main paper):
+\begin{equation}
+  \label{eq:lambda}
+  \lambda = \frac{1}{2}\left\lbrace
+    \sqrt{[\alpha-\beta - (H-1)\kappa]^2 + 4H\alpha\beta}
+    -\alpha+\beta-(H+1)\kappa
+    \right\rbrace - \gamma.
+\end{equation}
+
+We set the parameters to sweep:
+<<params>>=
+beta0 <- c(0.05, 0.1, 0.3, 0.6)
+alpha0 <- c(0.6,1,2,5)
+H0 <- 1:16
+gamma0 <- c(0.06,  0.125, 0.25, 0.3)
+data <- expand_grid(beta=beta0, alpha=alpha0, H=H0, gamma=gamma0)
+data
+@ 
+
+Numerical solution:
+<<solution>>=
+kap <- function(alpha, beta, H, gamma) {
+    f <- uniroot(function(kappa) 
+        0.5*(sqrt((alpha-beta-(H-1)*kappa)^2 +
+                  4*H*alpha*beta)-alpha +
+             beta - (H+1)*kappa) - gamma,
+        lower=-10, upper=10)
+    if(f$root>0) {
+        return(f$root)
+    } else {
+        return(0)
+    }
+}
+kap(0.6, 0.06, 6, 0.125)
+data <- data %>% 
+    mutate(kappa=Vectorize(kap)(alpha, beta,
+        H, gamma))                
+data
+@ 
+
+The plot is shown on Figure~\ref{fig:kappa}.
+
+\begin{figure}
+  \centering
+<<kappaPlot, dev='tikz'>>=
+alpha_lab <- function(val) {
+    paste0("$\\alpha=\\SI{", val, "}{days^{-1}}$")
+}      
+beta_lab <- function(val) {
+    paste0("$\\beta=\\SI{", val, "}{days^{-1}}$")
+}
+H_lab <- function(val) {
+    paste0("$H=", val, "$")
+}
+ggplot(data) + geom_line(aes(H, kappa, 
+                             color=as_factor(gamma))) +
+        facet_grid(alpha~beta,
+                   labeller=labeller(.cols=beta_lab,
+                                     .rows=alpha_lab)) +
+        xlab("$H$") + ylab("$\\kappa$") +
+    labs(color='$\\gamma, \\si{days^{-1}}$')
+
+@ 
+  
+  \caption{The minimal testing rate to stop the epidemics}
+  \label{fig:kappa}
+\end{figure}
+
+\clearpage
+\section{Epidemics progression}
+\label{sec:progression}
+
+The simulation data are in \path{../data/param_sweep.npy.gz}.  
+We read it as shown below.
+Variables for the var column:
+\begin{description}
+  \item[$S$:] susceptible households
+  \item[$F$:] unquarantined single infection households
+  \item[$F_q$:] quarantined single infection households
+  \item[$G$:] unquarantined fully infected households
+  \item[$G_q$:] quarantined fully infected households
+  \item[$R$:] recovered
+  \item[$I$:] total unquarantined infected individuals
+  \item[$I_t$:] total infected individuals (including those in quarantine)
+\end{description}
+
+<<reading_comparison_data>>=
+gz <- import('gzip')
+np <- import('numpy')
+simdata <- np$load(gz$open("../data/param_sweep.npy.gz"))
+beta0 <- c(0.05, 0.1, 0.3, 0.6)
+alpha0 <- c(0.6,1,2,5)
+H0 <- c(1,2,4,8,16)
+rep0 <- c(1,10)
+var0 <- c('S', 'F', 'Fq', 'G', 'Gq', 'R', 'I', 'It')
+t0 <- seq(0, 15, by=0.1)
+df <- expand_grid(beta=1:length(beta0),
+                  alpha=1:length(alpha0),
+                  H=1:length(H0),
+                  rep=1:length(rep0),
+                  var=1:length(var0),
+                  t=1:length(t0))
+fill <- 
+    Vectorize(
+        function(beta, alpha, H, rep, var, t) 
+            simdata[beta, alpha, H, rep, var, t])
+df <- df %>% mutate(value=fill(beta, alpha, H, rep, var, t)) %>%
+    mutate(beta=beta0[beta],
+           alpha=alpha0[alpha],
+           H=H0[H],
+           rep=rep0[rep],
+           var=var0[var],
+           t=t0[t])
+df      
+@ 
+
+
+Now mean field.  We use the following equations
+\begin{equation}
+  \label{eq:tracing_eqs}
+  \begin{aligned}
+    \frac{dF}{dt} &= \beta \frac{SH}{N} F + \beta \frac{SH}{N} GH
+        -\alpha F -\gamma F -\kappa F\\
+    \frac{dG}{dt} &= \alpha F - \gamma G - H\kappa G\\
+    \frac{dS}{dt} &= -\beta \frac{SH}{N} F - \beta \frac{SH}{N} GH 
+  \end{aligned}
+\end{equation}
+
+Numerical solution:
+<<meanField>>=
+eqs <- function(t, state, params) {
+    with(as.list(c(state, params)), {
+        dFdt <- beta*S*H/N*(F+G*H)-alpha*F-gamma*F - kappa*F
+        dGdt <- alpha*F-gamma*G - H*kappa*G
+        dSdt <- -beta*S*H/N*(F+G*H)
+        list(c(dFdt, dGdt, dSdt))
+    })}
+prediction_params <- expand_grid(beta=beta0, alpha=alpha0,
+                                 H=H0)
+prediction <- 
+    bind_rows(lapply(1:nrow(prediction_params),
+                     function(i) {
+                         alpha <- prediction_params[[i, 'alpha']]
+                         beta <- prediction_params[[i, 'beta']]
+                         H <- prediction_params[[i, 'H']]
+                         N <- 200000
+                         params <- 
+                             list(alpha=alpha, 
+                                  beta=beta, 
+                                  H=H,
+                                  gamma = 0.125,
+                                  kappa = 0.06,
+                                  N = N)
+                         initState <- c(F=20, G=0, S=(N-20)/H)
+                         times=seq(0,15, by=0.01)
+                         out <- ode(initState, times, eqs, 
+                                    params)
+                         as_tibble(as.data.frame(out)) %>%
+                             mutate(alpha=alpha, beta=beta, H=H,
+                                    I=F+H*G)
+                     }))
+prediction
+@ 
+
+The plot is shown on Figure~\ref{fig:prediction}.  
+
+\begin{figure}
+  \centering
+<<infectedsPlot, dev='tikz'>>=
+ggplot(df %>% filter(var=='I' & floor(t)==t) %>% 
+       group_by(beta, alpha, t, H) %>%
+       summarise(I=median(value), delta=1.58*IQR(value)/sqrt(10)) %>%
+       filter(I-delta>=1)) + 
+    geom_errorbar(aes(x=t, y=I,  ymin=I-delta,
+                     ymax=I+delta, color=as_factor(H))) +
+    geom_line(data=prediction %>% filter(I>=1), 
+              aes(time, I, color=as_factor(H))) + 
+    scale_y_log10() +
+    facet_grid(alpha~beta,
+               labeller=labeller(.cols=beta_lab,
+                                 .rows=alpha_lab)) +
+        xlab("Time, days") + ylab("Infected") +
+    labs(color='$H$') 
+@   
+  \caption{Predicted numbers of quarantined and non-quarantined
+    infecteds.  Error bars are simulations, lines are mean field}
+  \label{fig:prediction}
+\end{figure}
+
+
+\clearpage
+\section{Heatmaps}
+\label{sec:heatmaps}
+
+The data for the heatmap is provided by the file
+\path{../data/heatmap_data.npy}.  
+<<reading_infecteds>>=
+gz <- import('gzip')
+np <- import('numpy')
+infecteds_data <- np$load(gz$open("../data/heatmap_data.npy.gz"))
+str(infecteds_data)
+beta0 <- seq(from=0.05, to=0.6, length.out=20)
+alpha0 <- seq(from=0.6, to=5, length.out=20)
+kappa0 <- seq(from=0, to=0.6, length.out=20)
+H0 <- c(1,2,4,8,16)
+var0 <- c('S', 'F', 'Fq', 'G', 'Gq', 'R', 'I', 'It')
+rep0 <- 1:5
+infecteds <- expand_grid(beta_ind=1:length(beta0),
+                  alpha_ind=1:length(alpha0),
+                  kappa_ind=1:length(kappa0),
+                  H_ind=1:length(H0),
+                  rep=1:length(rep0),
+                  var_ind=1:length(var0),
+                  )
+fill <- 
+    Vectorize(
+        function(beta_ind, alpha_ind, kappa_ind, H_ind, rep, var_ind) 
+            infecteds_data[beta_ind, alpha_ind, 
+                           kappa_ind, H_ind, rep, var_ind])
+infecteds <- infecteds %>% 
+    mutate(value=fill(beta_ind, alpha_ind, kappa_ind, H_ind, rep, var_ind)) %>%
+    mutate(beta=beta0[beta_ind],
+           alpha=alpha0[alpha_ind],
+           kappa=kappa0[kappa_ind],
+           H=H0[H_ind]) %>%
+        mutate(var=var0[var_ind]) %>%
+    filter(var=='It' | var=='R') %>%
+    pivot_wider(names_from=var, values_from=value) %>%
+    group_by(beta_ind, alpha_ind, kappa_ind, H_ind) %>%
+    summarise(total=sum(R, na.rm=T)/length(rep0)*H +
+                  sum(It, na.rm=T)/length(rep0),
+              alpha=first(alpha),
+              beta=first(beta),
+              kappa=first(kappa),
+              H=first(H)) 
+
+infecteds
+@ 
+
+
+The plots are on Figures~\ref{fig:testing1}--~\ref{fig:testing14}.
+
+
+
+\begin{figure}
+  \centering
+<<Testing1, dev='tikz'>>=
+ggplot(infecteds %>% filter(kappa_ind==1)) +
+    geom_tile(aes(alpha, beta, fill=total)) +
+    facet_wrap(~H, labeller=labeller(H=H_lab))  + 
+    scale_fill_gradient(low="green", high="red",
+                        limits=c(0,200000)) +
+    xlab("$\\alpha, \\si{days^{-1}}$") + 
+    ylab("$\\beta, \\si{days^{-1}}$") + 
+    labs(fill="Total cases") +
+    theme(legend.position=c(0.8, 0.2))
+@   
+  \caption{Total number of infections for
+    $\kappa=\SI{\Sexpr{round(kappa0[1],4)}}{days^{-1}}$}
+  \label{fig:testing1}
+\end{figure}
+
+\begin{figure}
+  \centering
+<<Testing5, dev='tikz'>>=
+ggplot(infecteds %>% filter(kappa_ind==5)) +
+    geom_tile(aes(alpha, beta, fill=total)) +
+    facet_wrap(~H, labeller=labeller(H=H_lab))  + 
+    scale_fill_gradient(low="green", high="red",
+                        limits=c(0,200000)) +
+    xlab("$\\alpha, \\si{days^{-1}}$") + 
+    ylab("$\\beta, \\si{days^{-1}}$") + 
+    labs(fill="Total cases") +
+    theme(legend.position=c(0.8, 0.2))
+@ 
+  \caption{Total number of infections for
+    $\kappa=\SI{\Sexpr{round(kappa0[5],4)}}{days^{-1}}$}
+  \label{fig:testing5}
+\end{figure}
+
+
+
+\begin{figure}
+  \centering
+<<Testing8, dev='tikz'>>=
+ggplot(infecteds %>% filter(kappa_ind==8)) +
+    geom_tile(aes(alpha, beta, fill=total)) +
+    facet_wrap(~H, labeller=labeller(H=H_lab))  + 
+    scale_fill_gradient(low="green", high="red",
+                        limits=c(0,200000)) +
+    xlab("$\\alpha, \\si{days^{-1}}$") + 
+    ylab("$\\beta, \\si{days^{-1}}$") + 
+    labs(fill="Total cases") +
+    theme(legend.position=c(0.8, 0.2))
+@ 
+  \caption{Total number of infections for
+    $\kappa=\SI{\Sexpr{round(kappa0[8], 4)}}{days^{-1}}$}
+  \label{fig:testing8}
+\end{figure}
+
+\begin{figure}
+  \centering
+<<Testing12, dev='tikz'>>=
+ggplot(infecteds %>% filter(kappa_ind==12)) +
+    geom_tile(aes(alpha, beta, fill=total)) +
+    facet_wrap(~H, labeller=labeller(H=H_lab))  + 
+    scale_fill_gradient(low="green", high="red",
+                        limits=c(0,200000)) +
+    xlab("$\\alpha, \\si{days^{-1}}$") + 
+    ylab("$\\beta, \\si{days^{-1}}$") + 
+    labs(fill="Total cases") +
+    theme(legend.position=c(0.8, 0.2))
+@ 
+  \caption{Total number of infections for
+    $\kappa=\SI{\Sexpr{round(kappa0[12], 4)}}{days^{-1}}$}
+  \label{fig:testing12}
+\end{figure}
+
+\begin{figure}
+  \centering
+<<Testing14, dev='tikz'>>=
+ggplot(infecteds %>% filter(kappa_ind==14)) +
+    geom_tile(aes(alpha, beta, fill=total)) +
+    facet_wrap(~H, labeller=labeller(H=H_lab))  + 
+    scale_fill_gradient(low="green", high="red",
+                        limits=c(0,200000)) +
+    xlab("$\\alpha, \\si{days^{-1}}$") + 
+    ylab("$\\beta, \\si{days^{-1}}$") + 
+    labs(fill="Total cases") +
+    theme(legend.position=c(0.8, 0.2))
+@ 
+  \caption{Total number of infections for
+    $\kappa=\SI{\Sexpr{round(kappa0[14],4)}}{days^{-1}}$}
+  \label{fig:testing14}
+\end{figure}
+
+
+
+\clearpage
+\appendix
+\section{Session information}
+\label{sec:session}
+
+<<setup, eval=FALSE, purl=FALSE>>=
+@
+
+
+<<sessionInfo, results='asis', cache=FALSE, purl=FALSE>>=
+gsub("\\verb\\|([^\\|]*)\\|", "\\path{\\1}", 
+     toLatex(sessionInfo()))
+@
+
+\end{document}
